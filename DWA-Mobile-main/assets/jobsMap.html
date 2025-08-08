@@ -1,0 +1,281 @@
+<!-- jobsMap.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DWA Jobs Map</title>
+  <style>
+    #map {
+      height: 100vh;
+      width: 100%;
+    }
+    .filters {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      background: white;
+      padding: 10px;
+      border-radius: 8px;
+      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
+      z-index: 9999;
+    }
+    .filters label {
+      display: block;
+      margin-bottom: 5px;
+    }
+  </style>
+  <link
+    rel="stylesheet"
+    href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css"
+  />
+  <script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyDuzyrFSy2LjlO5aKUlWssmG65j7Xvn2IM"></script>
+  <script src="https://unpkg.com/@googlemaps/markerclusterer/dist/index.min.js"></script>
+
+
+</head>
+<body>
+  <!--<div class="filters">
+    <label><input type="checkbox" id="transitLayerToggle" /> Show Transit</label>
+    <label><input type="checkbox" id="bikeLayerToggle" /> Show Bike Routes</label>
+  </div>-->
+  <div id="map"></div>
+
+  <script>
+    let map, transitLayer, bikeLayer;
+    let transitLayerVisible = false;
+    let transitFeatures = [];
+    let allJobs = [];
+    let markers = [];
+
+
+
+    async function fetchJobs() {
+      const response = await fetch("http://192.168.2.16:3000/api/jobs/map");
+      const data = await response.json();
+      return data.jobs;
+    }
+
+    function groupJobsByLocation(jobs) {
+      const jobGroups = new Map();
+      for (const job of jobs) {
+        const key = `${job.latitude},${job.longitude}`;
+        if (!jobGroups.has(key)) jobGroups.set(key, []);
+        jobGroups.get(key).push(job);
+      }
+      return jobGroups;
+    }
+
+    function addJobMarkers(jobGroups, map) {
+      //const markers = [];
+      const savedJobIds = getSavedJobIds();
+
+      jobGroups.forEach((jobsAtLocation, key) => {
+
+        const [lat, lng] = key.split(',').map(Number);
+        const marker = new google.maps.Marker({
+          position: { lat, lng },
+          map,
+          icon: {
+              url: "https://img.icons8.com/ios-filled/50/1E90FF/briefcase.png",
+              scaledSize: new google.maps.Size(30, 30),
+          },
+        });
+
+        let content = `<div style="font-family: sans-serif; max-width: 260px;">
+          <strong style="font-size: 16px; color: #213E64; display: block; margin-bottom: 8px;">
+            💼 ${jobsAtLocation.length} job${jobsAtLocation.length > 1 ? 's' : ''} available here
+          </strong>
+        `;
+
+        for (const job of jobsAtLocation) {
+          const isSaved = savedJobIds.has(job._id); // check if job is saved
+
+          content += `
+            <div style="margin-bottom: 12px;">
+              <div style="display: flex; justify-content: space-between; align-items: center;">
+                <div>
+                  <div style="font-weight: bold;">${job.job_title}</div>
+                  <div>${job.employer}</div>
+                </div>
+                 <i class="fa${isSaved ? 's' : 'r'} fa-bookmark"
+                  onclick="toggleSaveJob('${job._id}', '${job.job_title}', '${job.employer}', '${job.url}', ${job.latitude}, ${job.longitude}, this)"
+                  style="cursor: pointer; font-size: 18px; color: #213E64; margin-left: 8px;"></i>
+              </div>
+              <div style="display: flex; gap: 6px; justify-content: space-between; margin-top: 6px;">
+                <a href="${job.url}" target="_blank" style="flex: 1; text-align: center; color: white; background-color: #213E64; padding: 6px 10px; border-radius: 4px; text-decoration: none;">View Job</a>
+                <button onclick="getDirections(${job.latitude}, ${job.longitude})" style="flex: 1; background-color: #649A47; color: white; padding: 6px 10px; border: none; border-radius: 4px; cursor: pointer;">Get Directions</button>
+              </div>
+            </div>
+            <hr />
+          `;
+        }
+
+        content += `</div>`;
+        const infowindow = new google.maps.InfoWindow({ content });
+        marker.addListener("click", () => {
+          infowindow.open(map, marker);
+        });
+
+        markers.push(marker);
+      });
+
+      new markerClusterer.MarkerClusterer({ map, markers });
+    }
+
+    function getDirections(lat, lng) {
+      const origin = navigator.geolocation.getCurrentPosition((pos) => {
+        const originCoords = `${pos.coords.latitude},${pos.coords.longitude}`;
+        window.location.href = `https://www.google.com/maps/dir/?api=1&origin=${originCoords}&destination=${lat},${lng}&travelmode=driving`;
+      });
+    }
+
+    async function initMap() {
+      map = new google.maps.Map(document.getElementById("map"), {
+        center: { lat: 43.8975, lng: -78.8658 },
+        zoom: 10,
+      });
+
+      await loadTransitRoutes();
+
+      transitLayer = new google.maps.TransitLayer();
+      bikeLayer = new google.maps.BicyclingLayer();
+
+      const routeInfoWindow = new google.maps.InfoWindow();
+
+      map.data.addListener("click", (event) => {
+        const routeId = event.feature.getProperty("ROUTE_ID");
+        const routeName = event.feature.getProperty("ROUTE_NAME");
+
+        const content = `
+          <div style="font-family: sans-serif; font-size: 14px;">
+            <strong>Bus Route: ${routeId} - ${routeName}</strong>
+          </div>
+        `;
+
+        routeInfoWindow.setContent(content);
+        routeInfoWindow.setPosition(event.latLng);
+        routeInfoWindow.open(map);
+      });
+
+      // Close transit info window when clicking anywhere else on the map
+      map.addListener("click", () => {
+        if (routeInfoWindow) {
+          routeInfoWindow.close();
+        }
+      });
+
+      const jobs = await fetchJobs();
+      allJobs = jobs;
+      const grouped = groupJobsByLocation(jobs);
+      addJobMarkers(grouped, map);
+    }
+
+
+    async function loadTransitRoutes() {
+      try {
+        const response = await fetch('http://192.168.0.31:3000/static/Transit_Routes.geojson');
+        const geojson = await response.json();
+        transitFeatures = map.data.addGeoJson(geojson);
+        console.log("GeoJSON added to map");
+
+        // Hide by default
+        map.data.setStyle({ visible: false });
+      } catch (error) {
+        console.error("Failed to load transit GeoJSON:", error);
+      }      
+    }
+
+    function toggleSaveJob(_id, title, employer, url, lat, lng, iconEl) {
+      const job = {id: _id, title, employer, url, latitude: lat, longitude: lng };
+
+      if (window.ReactNativeWebview) {
+        window.ReactNativeWebview.postMessage(JSON.stringify({ type: "TOGGLE_SAVE_JOB", job }));
+      }
+
+      const isSaved = iconEl.classList.contains("fas");
+      iconEl.classList.remove(isSaved ? "fas" : "far");
+      iconEl.classList.add(isSaved ? "far" : "fas");
+    }
+
+    function getSavedJobIds() {
+      const saved = localStorage.getItem("savedJobs");
+      const savedJobs = saved ? JSON.parse(saved) : [];
+      return new Set(savedJobs.map(job => job._id));
+    }
+
+    function updateJobMarkers(filteredJobs) {
+      // Clear existing markers
+      for (const marker of markers) {
+        marker.setMap(null);
+      }
+      markers = [];
+
+      const grouped = groupJobsByLocation(filteredJobs);
+      addJobMarkers(grouped, map);
+    }
+
+
+    window.addEventListener("message", (event) => {
+      try {
+        const data = JSON.parse(event.data);
+
+        if (data.type === "TRANSIT") {
+          transitLayerVisible = data.value;
+          map.data.setStyle((feature) => {
+            const routeId = feature.getProperty("ROUTE_ID");
+
+            const routeColors = {
+              "216": "#1E90FF",
+              "224": "#2E8B57",
+              "302": "#FF8C00",
+              "403": "#9C27B0",
+              "407": "#FF1493",
+              "410": "#FFD700",
+              "980": "#A52A2A",
+              "915": "#20B2AA",
+              "916": "#8B0000",
+              "405": "#00BFFF",
+              "900": "#4CAF50",
+              "901B": "#FF4500",
+              "291": "#7B68EE",
+              "120": "#FF69B4",
+              "101": "#9932CC",
+              "917": "#00CED1",
+              "110": "#DC143C",
+              "905": "#008B8B",
+              "902S": "#B8860B",
+              "901": "#556B2F"
+            };
+
+            return {
+              visible: data.value,
+              strokeColor: routeColors[routeId] || "#FF5733",
+              strokeWeight: 2,
+              strokeOpacity: 1.0,
+            };
+          });
+        }
+
+        if (data.type === "BIKES") {
+          bikeLayer.setMap(data.value ? map : null);
+        }
+
+        if (data.type === "SEARCH") {
+          const searchQuery = data.value.toLowerCase();
+          const filtered = allJobs.filter(job =>
+            job.job_title.toLowerCase().includes(searchQuery)
+          );
+          updateJobMarkers(filtered);
+        }
+       
+
+      } catch (e) {
+        console.error("Failed to process message from React Native:", e);
+      }
+    });
+    window.onload = initMap;
+  </script>
+</body>
+</html>
+
